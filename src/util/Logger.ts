@@ -1,24 +1,41 @@
 import chalk from 'chalk'
-
 import { Webhook } from './Webhook'
+import { Ntfy } from './Ntfy'
 
-export function log(isMobile: boolean | 'main', title: string, message: string, type: 'log' | 'warn' | 'error' = 'log', color?: keyof typeof chalk): void {
+export async function log(isMobile: boolean | 'main', title: string, message: string, type: 'log' | 'warn' | 'error' = 'log', color?: keyof typeof chalk) {
     const currentTime = new Date().toLocaleString()
     const platformText = isMobile === 'main' ? 'MAIN' : isMobile ? 'MOBILE' : 'DESKTOP'
     const chalkedPlatform = isMobile === 'main' ? chalk.bgCyan('MAIN') : isMobile ? chalk.bgBlue('MOBILE') : chalk.bgMagenta('DESKTOP')
 
-    // Clean string for the Webhook (no chalk)
+    // Clean string for Webhook and NTFY (no chalk formatting)
     const cleanStr = `[${currentTime}] [PID: ${process.pid}] [${type.toUpperCase()}] ${platformText} [${title}] ${message}`
 
-    // Send the clean string to the Webhook
-    Webhook(cleanStr)
+    // Send to Webhook if enabled
+    await Webhook(cleanStr)
+
+    // Define conditions for sending to NTFY
+    const ntfyConditions = {
+        log: [
+            message.toLowerCase().includes('completed tasks for'),
+            message.toLowerCase().includes('press the number')
+        ],
+        error: [message.toLowerCase().includes('ending')],
+        warn: [
+            message.toLowerCase().includes('aborting'),
+            message.toLowerCase().includes('didn\'t gain')
+        ]
+    }
+
+    // Check if the current log type and message meet the NTFY conditions
+    if (type in ntfyConditions && ntfyConditions[type as keyof typeof ntfyConditions].some(condition => condition))
+        await Ntfy(cleanStr, type)
 
     // Formatted string with chalk for terminal logging
     const str = `[${currentTime}] [PID: ${process.pid}] [${type.toUpperCase()}] ${chalkedPlatform} [${title}] ${message}`
 
     const applyChalk = color && typeof chalk[color] === 'function' ? chalk[color] as (msg: string) => string : null
 
-    // Log based on the type
+    // Log based on type
     switch (type) {
         case 'warn':
             applyChalk ? console.warn(applyChalk(str)) : console.warn(str)
