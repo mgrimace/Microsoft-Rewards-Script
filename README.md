@@ -112,9 +112,9 @@ ACCOUNT_1_PASSWORD=your_password
 > To update, delete `./config/config.json` and restart — a fresh one will be generated from the latest example, with your `compose.yaml` overrides re-applied.
 
 - Start the container: `docker compose up -d`
-    > [!TIP]
-    > Monitor logs with `docker logs microsoft-rewards-script`, useful for viewing passwordless login codes or diagnosing issues.
-    > You can also enable a webhook in `compose.yaml` for notifications.
+> [!TIP]
+> Monitor logs with `docker logs microsoft-rewards-script`, useful for viewing passwordless login codes or diagnosing issues.
+> You can also enable a webhook in `compose.yaml` for notifications.
 
 ---
 
