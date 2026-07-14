@@ -49,6 +49,7 @@ export interface StreakState {
 export interface StreakProtectionState {
     isProtectionOn: boolean
     remainingDays: number | null
+    streakCounter: number | null
 }
 
 export interface AccountState {
@@ -82,11 +83,12 @@ export default class ReactFunc {
         const streaks = this.parseStreaks(combined)
         const streakProtection = this.parseStreakProtection(combined)
         const account = this.parseAccountData(combined)
+        const accountEmail = this.bot.currentAccountEmail
 
         this.bot.logger.info(
             this.bot.isMobile,
             'REACT-PARSE',
-            `Snapshot complete | offers=${offers.length} | reportable=${offers.filter(o => o.reportable).length} | streaks=${streaks.length} | protection=${streakProtection ? `on=${streakProtection.isProtectionOn},days=${streakProtection.remainingDays ?? '?'}` : 'n/a'} | level=${account.level}`
+            `Snapshot complete | offers=${offers.length} | reportable=${offers.filter(o => o.reportable).length} | streaks=${streaks.length} | streakProtectionEnabled=${streakProtection?.isProtectionOn ?? 'null'} | streakProtectionRemainingDays=${streakProtection?.remainingDays ?? 'null'} | streakCounter=${streakProtection?.streakCounter ?? 'null'} | level=${account.level} | account=${accountEmail ?? 'null'}`
         )
 
         return {
@@ -327,16 +329,18 @@ export default class ReactFunc {
             // The flag and remainingDays
             const withDays = carriers.find(o => 'remainingDays' in o && typeof o.remainingDays === 'number')
             const withFlag = carriers.find(o => typeof o.isProtectionOn === 'boolean')
+            const withStreakCounter = carriers.find(o => 'streakCounter' in o && typeof o.streakCounter === 'number')
 
             const state: StreakProtectionState = {
                 isProtectionOn: (withDays?.isProtectionOn ?? withFlag?.isProtectionOn) === true,
-                remainingDays: withDays ? (withDays.remainingDays as number) : null
+                remainingDays: withDays ? (withDays.remainingDays as number) : null,
+                streakCounter: withStreakCounter ? (withStreakCounter.streakCounter as number) : null
             }
 
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'REACT-PARSE',
-                `Parsed streak protection | on=${state.isProtectionOn} | remainingDays=${state.remainingDays ?? 'n/a'}`
+                `Parsed streak protection | enabled=${state.isProtectionOn} | remainingDays=${state.remainingDays ?? 'null'} | streakCounter=${state.streakCounter}`
             )
 
             return state
@@ -383,7 +387,8 @@ export default class ReactFunc {
             )
 
             if (account.level === null && account.availablePoints === null) {
-                this.bot.logger.warn(
+                // Common error! Keep however for debugging!
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'REACT-PARSE',
                     'Account state empty - membership/header objects not found in payload'
@@ -553,27 +558,16 @@ export default class ReactFunc {
         const out: QuestChild[] = []
         const seen = new Set<string>()
 
-        const idRe = /"offerId":"([^"]*pcchild[^"]*)"/g
-        for (const questMatch of combined.matchAll(idRe)) {
-            const offerId = questMatch[1] as string
-            if (seen.has(offerId)) continue
+        for (const obj of this.extractObjects(combined, '"offerId"')) {
+            const offerId = obj.offerId as string | undefined
+            if (!offerId || !offerId.includes('pcchild') || seen.has(offerId)) continue
             seen.add(offerId)
 
-            const at = questMatch.index ?? 0
-            const childAt = combined.indexOf('"children"', at)
-            const windowEnd = childAt !== -1 && childAt - at < 1200 ? childAt : Math.min(at + 600, combined.length)
-            const region = combined.slice(at, windowEnd)
-
-            const hashMatch = region.match(/"hash":"([0-9a-f]{64})"/)
-            const hash = hashMatch?.[1] ?? null
-
-            const pointsMatch = region.match(/"points":(\d+)/)
-            const points = pointsMatch ? Number(pointsMatch[1]) : 0
-
-            const flag = (name: string): boolean => new RegExp(`"${name}":true`).test(region)
-            const isCompleted = flag('isCompleted')
-            const isLocked = flag('isLocked')
-            const isDisabled = flag('isDisabled')
+            const hash = (obj.hash as string | null) ?? null
+            const points = (obj.points as number) ?? (obj.pointProgressMax as number) ?? 0
+            const isCompleted = ((obj.isCompleted ?? obj.complete) as boolean | undefined) === true
+            const isLocked = (obj.isLocked as boolean | undefined) === true
+            const isDisabled = (obj.isDisabled as boolean | undefined) === true
 
             const reportable = !!hash && !isCompleted && !isLocked && !isDisabled
 

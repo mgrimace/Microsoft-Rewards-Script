@@ -46,6 +46,13 @@ const WebhookSchema = z.object({
             priority: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional()
         })
         .optional(),
+    telegram: z
+        .object({
+            enabled: z.boolean().optional(),
+            botToken: z.string(),
+            chatId: z.string()
+        })
+        .optional(),
     webhookLogFilter: LogFilterSchema
 })
 
@@ -69,7 +76,8 @@ export const ConfigSchema = z.object({
         doBonusSearches: z.boolean(),
         doDailyCheckIn: z.boolean(),
         doReadToEarn: z.boolean(),
-        doActivateSearchPerk: z.boolean()
+        doActivateSearchPerk: z.boolean(),
+        doVisualSearch: z.boolean().default(false)
     }),
     activities: z
         .object({
@@ -144,7 +152,8 @@ const defaultConfig: Config = {
         doBonusSearches: false,
         doDailyCheckIn: true,
         doReadToEarn: true,
-        doActivateSearchPerk: true
+        doActivateSearchPerk: true,
+        doVisualSearch: false
     },
     activities: {
         urlReward: true,
