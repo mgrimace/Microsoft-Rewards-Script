@@ -16,11 +16,9 @@ services:
             # ── Scheduler ──────────────────────────────────────
             TZ: 'America/Toronto'
             NODE_ENV: 'production'
-            # CRON_SCHEDULE is only the *initial* default. Once a schedule is
-            # saved via PUT /schedule (e.g. from the dashboard's Schedule tab
-            # with "Bot container" selected), it's persisted to
-            # ./config/schedule.json and takes over from here on — delete
-            # that file to fall back to CRON_SCHEDULE again.
+            # CRON_SCHEDULE is the *initial* default. It will run as default unless changed by the API
+            # API schedule changes are saved to ./config/schedule.json, delete
+            # that file to revert to the base CRON_SCHEDULE again.
             CRON_SCHEDULE: '0 7 * * *' # use crontab.guru to customize your schedule
             RUN_ON_START: 'true' # run script immediately on container start
             SKIP_RANDOM_SLEEP: 'false'
@@ -37,12 +35,6 @@ services:
             #API_ALLOW_ENV_OVERRIDES: 'true'
             #API_ALLOW_CONFIG_REVEAL: 'true'
             #API_ALLOW_CONFIG_WRITE: 'true'
-
-            # Set true to let the dashboard (or any Control API client) read
-            # and rewrite this container's own cron schedule live, no restart
-            # needed. Off by default — writing to cron is a step up in trust
-            # from just starting/stopping runs.
-            #API_ALLOW_SCHEDULE_WRITE: 'true'
 
             #  ── Configuration ──────────────────────────────────────
             # Uncomment to override defaults, a full list of configuration options are in the README.
