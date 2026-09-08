@@ -1,20 +1,3 @@
-/**
- * ConfigEnvOverrides.ts
- *
- * Single source of truth for the CONFIG_* environment variable overrides
- * applied to config.json on every docker container start. Previously this
- * mapping existed twice in entrypoint.sh: once as a hand-written doc comment
- * and once as the actual `_cfg`/`_cfg_array` call list - the two had to be
- * kept in sync by hand. Now there's one table (ENV_OVERRIDES) that both the
- * apply logic and `list` output are generated from.
- *
- * Not used by bare metal at all - Load.ts/Validator.ts are untouched.
- *
- * Usage:
- *   node dist/util/ConfigEnvOverrides.js apply --config <path>
- *   node dist/util/ConfigEnvOverrides.js list [--format table|env]
- */
-
 import { readJson, writeConfigAtomic } from './ConfigSync'
 
 export type OverrideType = 'string' | 'bool' | 'number' | 'array'
@@ -32,6 +15,7 @@ export const ENV_OVERRIDES: EnvOverrideEntry[] = [
     { env: 'CONFIG_ERROR_DIAGNOSTICS', path: 'errorDiagnostics', type: 'bool' },
     { env: 'CONFIG_ENSURE_STREAK_PROTECTION', path: 'ensureStreakProtection', type: 'bool' },
     { env: 'CONFIG_AUTO_CLAIM_PUNCHCARD_REWARDS', path: 'autoClaimPunchcardRewards', type: 'bool' },
+    { env: 'CONFIG_CONTINTUE_ON_BOT_WARNING', path: 'contintueOnBotWarning', type: 'bool' },
     { env: 'CONFIG_SKIP_NON_POINT_TASKS', path: 'skipNonPointTasks', type: 'bool' },
     { env: 'CONFIG_GLOBAL_TIMEOUT', path: 'globalTimeout', type: 'string' },
     { env: 'CONFIG_ACCOUNT_DELAY_MIN', path: 'accountDelay.min', type: 'string' },
@@ -111,8 +95,6 @@ export const ENV_OVERRIDES: EnvOverrideEntry[] = [
     { env: 'CONFIG_WEBHOOK_LOG_FILTER_KEYWORDS', path: 'webhook.webhookLogFilter.keywords', type: 'array' }
 ]
 
-// headless is always forced true in docker - not env-var driven, so it isn't
-// in the table above, but it's applied the same way every start.
 const FORCED_OVERRIDES: { path: string; value: unknown }[] = [{ path: 'headless', value: true }]
 
 function setDeep(obj: Record<string, unknown>, dottedPath: string, value: unknown): void {
@@ -158,12 +140,6 @@ export interface OverrideError {
     message: string
 }
 
-/**
- * Reads ENV_OVERRIDES against `env` and returns the values to apply.
- * Matches the previous bash semantics: a scalar var that's unset OR set to
- * an empty string is skipped (no way to distinguish the two in `_cfg`); an
- * array var that's unset is skipped, but set-to-empty applies `[]`.
- */
 export function computeOverrides(env: NodeJS.ProcessEnv = process.env): {
     applied: ComputedOverride[]
     errors: OverrideError[]
@@ -200,12 +176,6 @@ export interface ApplyReport {
     errors: OverrideError[]
 }
 
-/**
- * Applies FORCED_OVERRIDES + ENV_OVERRIDES to config.json in one atomic
- * write. Unlike the old bash version (which wrote incrementally per
- * variable, so an invalid value left partial changes on disk), this
- * validates everything first and only writes if there are no errors.
- */
 export function applyEnvOverrides(configPath: string, env: NodeJS.ProcessEnv = process.env): ApplyReport {
     const { applied, errors } = computeOverrides(env)
     if (errors.length > 0) {
@@ -216,8 +186,6 @@ export function applyEnvOverrides(configPath: string, env: NodeJS.ProcessEnv = p
     for (const { path: p, value } of FORCED_OVERRIDES) setDeep(config, p, value)
     for (const { path: p, value } of applied) setDeep(config, p, value)
 
-    // No .bak here - this runs on every container start, unlike the rarer
-    // default-sync patch, so a backup per boot would just be noise.
     writeConfigAtomic(configPath, config, { backup: false })
 
     return { configPath, forced: FORCED_OVERRIDES, applied, errors: [] }
@@ -227,13 +195,58 @@ export function applyEnvOverrides(configPath: string, env: NodeJS.ProcessEnv = p
 if (require.main === module) {
     const args = process.argv.slice(2)
     const command = args[0]
-    const getArg = (flag: string) => {
-        const i = args.indexOf(flag)
-        return i !== -1 ? args[i + 1] : undefined
+
+    const printHelp = (): void => {
+        console.log(`
+Microsoft Rewards CONFIG_* environment overrides
+
+Usage:
+  node dist/util/ConfigEnvOverrides.js list [--format table|env]
+  node dist/util/ConfigEnvOverrides.js apply --config <path>
+
+Commands:
+  list         Show every supported environment override.
+  apply        Apply configured overrides to one config.json file.
+
+Options:
+  --format     Output format for list. Defaults to table.
+  --config     Required config.json path for apply.
+  --help       Show this help.
+
+Examples:
+  node dist/util/ConfigEnvOverrides.js list
+  node dist/util/ConfigEnvOverrides.js list --format env
+  node dist/util/ConfigEnvOverrides.js apply --config ./config.json
+`)
     }
 
+    const failUsage = (message: string): never => {
+        console.error(`[config-overrides] ERROR: ${message}`)
+        printHelp()
+        process.exit(1)
+    }
+
+    const readOnlyOption = (flag: string): string | undefined => {
+        const index = args.indexOf(flag)
+        if (index === -1) return undefined
+        const value = args[index + 1]
+        if (!value || value.startsWith('-')) failUsage(`${flag} requires a value after it.`)
+        return value
+    }
+
+    if (args.includes('--help') || args.includes('-h')) {
+        printHelp()
+        process.exit(0)
+    }
+    if (!command) failUsage('Missing command. Choose "list" or "apply".')
+    if (command !== 'list' && command !== 'apply') failUsage(`Unknown command "${command}".`)
+
     if (command === 'list') {
-        const format = getArg('--format') ?? 'table'
+        const format = readOnlyOption('--format') ?? 'table'
+        const expectedLength = args.includes('--format') ? 3 : 1
+        if (args.length !== expectedLength || !['table', 'env'].includes(format)) {
+            failUsage('The list command only accepts --format table or --format env.')
+        }
         if (format === 'env') {
             for (const e of ENV_OVERRIDES) console.log(e.env)
         } else {
@@ -246,11 +259,8 @@ if (require.main === module) {
     }
 
     if (command === 'apply') {
-        const configPath = getArg('--config')
-        if (!configPath) {
-            console.error('Usage: node dist/util/ConfigEnvOverrides.js apply --config <path>')
-            process.exit(1)
-        }
+        const configPath = readOnlyOption('--config') ?? failUsage('The apply command requires --config <path>.')
+        if (args.length !== 3) failUsage('The apply command only accepts --config <path>.')
         try {
             const report = applyEnvOverrides(configPath)
             if (report.errors.length > 0) {
@@ -266,10 +276,5 @@ if (require.main === module) {
             console.error(`[entrypoint] ERROR: ${err instanceof Error ? err.message : String(err)}`)
             process.exit(1)
         }
-    }
-
-    if (!command) {
-        console.error('Usage: node dist/util/ConfigEnvOverrides.js <apply|list> [options]')
-        process.exit(1)
     }
 }

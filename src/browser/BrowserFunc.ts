@@ -12,44 +12,108 @@ import type { DashboardData } from './../interface/DashboardData'
 import type { AppUserData } from '../interface/AppUserData'
 import type { AppEarnablePoints, BrowserEarnablePoints } from '../interface/Points'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
+import { detectFlyoutBotWarning, mapFlyoutToDashboard, type RewardsFlyoutData } from './FlyoutDashboard'
 
 export default class BrowserFunc {
     private bot: MicrosoftRewardsBot
 
     private rewardsDeploymentId = ''
 
+    private useFlyoutDashboardFallback = false
+
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
     }
 
     async getDashboardData(cookies?: Cookie[]): Promise<DashboardData> {
-        try {
-            const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
-            delete fingerprintHeaders['Cookie']
-            delete fingerprintHeaders['cookie']
+        const fingerprintHeaders = { ...(this.bot.fingerprint?.headers ?? {}) }
+        delete fingerprintHeaders['Cookie']
+        delete fingerprintHeaders['cookie']
 
-            const response = await this.bot.http.request<DashboardData>({
-                url: URLs.rewards.userInfoApi,
+        if (!this.useFlyoutDashboardFallback) {
+            let primaryError: unknown
+
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    const response = await this.bot.http.request<DashboardData>({
+                        url: URLs.rewards.userInfoApi,
+                        method: 'GET',
+                        headers: {
+                            ...fingerprintHeaders,
+                            Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.rewards.userInfoApi)),
+                            Referer: URLs.rewards.referer,
+                            Origin: URLs.rewards.origin
+                        },
+                        retries: 0
+                    })
+
+                    await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
+
+                    if (response.data?.dashboard) return response.data
+                    throw new Error('Dashboard data missing from API response')
+                } catch (error) {
+                    primaryError = error
+                    if (attempt === 1) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'GET-DASHBOARD-DATA',
+                            `Primary dashboard request failed; retrying once | message=${this.errorMessage(error)}`
+                        )
+                        await new Promise(resolve => setTimeout(resolve, 1000))
+                    }
+                }
+            }
+
+            this.useFlyoutDashboardFallback = true
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `Primary dashboard unavailable after one retry; using Bing flyout fallback | message=${this.errorMessage(primaryError)}`
+            )
+        }
+
+        return await this.getFlyoutDashboardData(cookies, fingerprintHeaders)
+    }
+
+    private async getFlyoutDashboardData(
+        cookies: Cookie[] | undefined,
+        fingerprintHeaders: Record<string, string>
+    ): Promise<DashboardData> {
+        try {
+            const response = await this.bot.http.request<RewardsFlyoutData>({
+                url: URLs.bing.rewardsFlyoutUserInfo,
                 method: 'GET',
                 headers: {
                     ...fingerprintHeaders,
-                    Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.rewards.userInfoApi)),
-                    Referer: URLs.rewards.referer,
-                    Origin: URLs.rewards.origin
-                }
+                    Accept: 'application/json',
+                    Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.bing.rewardsFlyoutUserInfo)),
+                    Referer: `${URLs.bing.origin}/`,
+                    Origin: URLs.bing.origin
+                },
+                retries: 0
             })
 
-            await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
+            await this.applyResponseCookies(URLs.bing.rewardsFlyoutUserInfo, response.headers['set-cookie'])
 
-            if (response.data) return response.data
-            throw new Error('Dashboard data missing from API response')
-        } catch (error) {
-            throw this.bot.logger.error(
+            const detection = detectFlyoutBotWarning(response.data)
+            this.bot.logger.warn(
                 this.bot.isMobile,
                 'GET-DASHBOARD-DATA',
-                `Failed to get dashboard data: ${error instanceof Error ? error.message : String(error)}`
+                `Using partial Bing flyout dashboard | suspectedLimited=${detection.likelyLimited} | botMarkers=${detection.hasBotProfileMarkers} | activitiesCollapsed=${detection.hasCollapsedActivities}`
             )
+            return mapFlyoutToDashboard(response.data)
+        } catch (error) {
+            this.bot.logger.error(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `Primary dashboard and Bing flyout fallback failed | message=${this.errorMessage(error)}`
+            )
+            throw error
         }
+    }
+
+    private errorMessage(error: unknown): string {
+        return error instanceof Error ? error.message : String(error)
     }
 
     async getAppDashboardData(): Promise<AppDashboardData> {
@@ -78,9 +142,9 @@ export default class BrowserFunc {
         }
     }
 
-    async getBrowserEarnablePoints(): Promise<BrowserEarnablePoints> {
+    async getBrowserEarnablePoints(data?: DashboardData): Promise<BrowserEarnablePoints> {
         try {
-            const data = await this.getDashboardData()
+            data ??= await this.getDashboardData()
 
             const desktopSearchPoints =
                 data.dashboard.userStatus.counters.pcSearch?.reduce(
@@ -211,6 +275,9 @@ export default class BrowserFunc {
             // /earn is the offers page
             await page.goto(URLs.rewards.earn, { waitUntil: 'domcontentloaded' })
 
+            // first-time welcome modal blocks the dashboard from rendering
+            await this.dismissRewardsWelcomeDialog(page)
+
             const earnDom = await page.content()
             const earnRaw = await this.fetchBootstrapHtml(page, URLs.rewards.earn, '/earn')
 
@@ -275,6 +342,30 @@ export default class BrowserFunc {
         }
     }
 
+    /**
+     * Dismisses the first-time welcome modal on /earn, which otherwise
+     * prevents section#dailyset from rendering.
+     */
+    private async dismissRewardsWelcomeDialog(page: Page): Promise<void> {
+        try {
+            const welcomeButton = await page
+                .waitForSelector('section[role="dialog"] button[slot="close"]', { timeout: 5000 })
+                .catch(() => null)
+            if (!welcomeButton) return
+
+            await welcomeButton.click({ timeout: 5000 })
+            this.bot.logger.info(this.bot.isMobile, 'BOOTSTRAP', 'Dismissed welcome dialog')
+
+            await page.waitForSelector('section#dailyset', { timeout: 15000 }).catch(() => undefined)
+        } catch (error) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'BOOTSTRAP',
+                `Failed to dismiss welcome dialog: ${error instanceof Error ? error.message : String(error)}`
+            )
+        }
+    }
+
     private async fetchBootstrapHtml(page: Page, url: string, route: string): Promise<string> {
         try {
             const res = await page.request.get(url, { timeout: 20000 })
@@ -320,23 +411,20 @@ export default class BrowserFunc {
             this.bot.logger.debug(this.bot.isMobile, 'BOOTSTRAP', `Fetching ${initialChunks.size} initial JS chunks`)
             const jsByPath = await this.fetchJsChunks(page, [...initialChunks])
 
-            // dynamically-imported chunks, server actions inside popover
-            const dynamicPaths: string[] = []
+            const dynamicPaths = new Set<string>()
             for (const js of jsByPath.values()) {
                 for (const path of this.extractDynamicChunkPaths(js)) {
-                    if (!jsByPath.has(path) && !dynamicPaths.includes(path)) {
-                        dynamicPaths.push(path)
-                    }
+                    if (!jsByPath.has(path)) dynamicPaths.add(path)
                 }
             }
 
-            if (dynamicPaths.length) {
+            if (dynamicPaths.size) {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'BOOTSTRAP',
-                    `Fetching ${dynamicPaths.length} dynamic chunks discovered via webpack manifest`
+                    `Fetching ${dynamicPaths.size} dynamic chunks discovered via webpack manifest`
                 )
-                const moreJs = await this.fetchJsChunks(page, dynamicPaths)
+                const moreJs = await this.fetchJsChunks(page, [...dynamicPaths])
                 for (const [path, js] of moreJs) jsByPath.set(path, js)
             }
 
@@ -549,14 +637,33 @@ export default class BrowserFunc {
 
         try {
             const context = page.context()
+            let liveCookies = await context.cookies()
+
             if (applyCached) {
-                const cached = this.getCachedCookies().filter(
-                    cookie => cookie.expires === -1 || cookie.expires > Date.now() / 1000
+                const now = Date.now() / 1000
+                const liveByKey = new Map(
+                    liveCookies.map(cookie => [`${cookie.domain}|${cookie.path}|${cookie.name}`, cookie])
                 )
-                if (cached.length) await context.addCookies(cached)
+                const changed = this.getCachedCookies().filter(cookie => {
+                    if (cookie.expires !== -1 && cookie.expires <= now) return false
+                    const live = liveByKey.get(`${cookie.domain}|${cookie.path}|${cookie.name}`)
+                    return (
+                        !live ||
+                        live.value !== cookie.value ||
+                        live.expires !== cookie.expires ||
+                        live.httpOnly !== cookie.httpOnly ||
+                        live.secure !== cookie.secure ||
+                        live.sameSite !== cookie.sameSite
+                    )
+                })
+
+                if (changed.length) {
+                    await context.addCookies(changed)
+                    liveCookies = await context.cookies()
+                }
             }
 
-            this.updateCookieCache(await context.cookies(), source)
+            this.updateCookieCache(liveCookies, source)
             return true
         } catch (error) {
             this.bot.logger.debug(

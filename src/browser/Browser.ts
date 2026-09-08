@@ -9,7 +9,6 @@ import { formatBrowserProxyServer } from '../util/Proxy'
 import { UserAgentManager } from './UserAgent'
 
 import type { Account } from '../interface/Account'
-import { configureMediaBlocking } from './MediaBlocker'
 
 /* Test Stuff
 https://abrahamjuliot.github.io/creepjs/
@@ -26,6 +25,8 @@ interface BrowserCreationResult {
 
 class Browser {
     private readonly bot: MicrosoftRewardsBot
+    private readonly fingerprintGenerator = new FingerprintGenerator()
+    private readonly userAgentManager: UserAgentManager
     private static readonly BROWSER_ARGS = [
         '--mute-audio',
         '--no-first-run',
@@ -43,6 +44,7 @@ class Browser {
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
+        this.userAgentManager = new UserAgentManager(bot)
     }
 
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
@@ -105,7 +107,10 @@ class Browser {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'SESSION',
-                    `Restoring saved browser session | cookies=${session.storageState.cookies.length} | origins=${session.storageState.origins.length} | ageMinutes=${ageMinutes}`
+                    `Restoring saved browser session | cookies=${session.storageState.cookies.length} | origins=${session.storageState.origins.length} | ageMinutes=${ageMinutes}` +
+                        (session.expiredCookiesRemoved
+                            ? ` | expiredCookiesRemoved=${session.expiredCookiesRemoved}`
+                            : '')
                 )
             } else {
                 this.bot.logger.info(
@@ -157,9 +162,6 @@ class Browser {
             })
             const context = injected as unknown as BrowserContext
 
-            // Only alter WebRTC when a proxy is in use. Removing these APIs on direct connections
-            // adds an unnecessary fingerprint difference; behind a proxy it prevents local/direct
-            // ICE candidates from exposing an address outside the configured proxy path.
             if (hasProxy) {
                 await context.addInitScript(() => {
                     // @ts-expect-error Chromium-specific runtime globals
@@ -171,8 +173,6 @@ class Browser {
                 })
             }
 
-            await configureMediaBlocking(this.bot, context)
-
             context.on('page', p => {
                 p.on('crash', () =>
                     this.bot.logger.error(this.bot.isMobile, 'BROWSER', `Renderer crashed | ${p.url()}`)
@@ -182,7 +182,7 @@ class Browser {
 
             context.setDefaultTimeout(this.bot.utils.stringToNumber(this.bot.config?.globalTimeout ?? 30000))
 
-            if (shouldUseFingerprint) {
+            if (shouldUseFingerprint && !reuseFingerprint) {
                 saveFingerprint(this.bot.config.sessionPath, account.email, this.bot.isMobile, fingerprint)
             }
 
@@ -204,15 +204,14 @@ class Browser {
         const hostOs: 'windows' | 'macos' | 'linux' =
             process.platform === 'darwin' ? 'macos' : process.platform === 'linux' ? 'linux' : 'windows'
 
-        const fingerPrintData = new FingerprintGenerator().getFingerprint({
+        const fingerPrintData = this.fingerprintGenerator.getFingerprint({
             devices: isMobile ? ['mobile'] : ['desktop'],
             operatingSystems: isMobile ? ['android'] : [hostOs],
             browsers: [{ name: 'edge' }],
             locales: this.bot.accountLocale.acceptedLocales
         })
 
-        const userAgentManager = new UserAgentManager(this.bot)
-        return await userAgentManager.updateFingerprintUserAgent(fingerPrintData, isMobile)
+        return this.userAgentManager.updateFingerprintUserAgent(fingerPrintData, isMobile)
     }
 }
 

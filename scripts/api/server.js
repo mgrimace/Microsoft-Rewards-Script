@@ -17,14 +17,71 @@ import {
 import { readSchedule, writeSchedule } from './scheduleStore.js'
 import { deleteStoredSessions, listStoredSessions } from './sessionStore.js'
 import { resolveRunCommand } from './runCommand.js'
-import { log, parseArgs, getProjectRoot, loadEnvFile, loadConfigSafe, redactSecrets, envStr, envBool } from './lib.js'
+import {
+    log,
+    parseArgs,
+    findUnknownOptions,
+    getProjectRoot,
+    loadEnvFile,
+    loadConfigSafe,
+    redactSecrets,
+    envStr,
+    envBool
+} from './lib.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const projectRoot = getProjectRoot(__dirname)
 
 loadEnvFile(projectRoot)
 
-const cliArgs = parseArgs()
+const cliArgs = parseArgs(process.argv.slice(2), { boolean: ['help', 'h'] })
+
+function printHelp() {
+    console.log(`
+Microsoft Rewards control API
+
+Usage:
+  npm run api
+  npm run api -- [--host <address>] [--port <number>] [--token <token>]
+
+Options:
+  --host        Listen address. Defaults to API_HOST or 127.0.0.1.
+  --port        Listen port from 1 to 65535. Defaults to API_PORT or 3010.
+  --token       One-time API token. API_TOKEN from .env takes precedence.
+  --help        Show this help.
+
+Examples:
+  npm run api
+  npm run api -- --port 3010
+  npm run api -- --host 0.0.0.0 --port 3010 --token "YOUR_API_TOKEN"
+`)
+}
+
+function failUsage(message) {
+    log('ERROR', message)
+    printHelp()
+    process.exit(1)
+}
+
+if (cliArgs.help || cliArgs.h) {
+    printHelp()
+    process.exit(0)
+}
+
+const unknownOptions = findUnknownOptions(cliArgs, ['host', 'port', 'token', 'help', 'h'])
+if (unknownOptions.length) {
+    failUsage(
+        `Unknown option${unknownOptions.length === 1 ? '' : 's'}: ${unknownOptions.map(v => `--${v}`).join(', ')}`
+    )
+}
+if (cliArgs._.length) {
+    failUsage(`Unexpected positional argument${cliArgs._.length === 1 ? '' : 's'}: ${cliArgs._.join(' ')}`)
+}
+for (const option of ['host', 'port', 'token']) {
+    if (cliArgs[option] === true || cliArgs[option] === '') {
+        failUsage(`--${option} requires a value after it.`)
+    }
+}
 
 function integerSetting(name, value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
     if (value === undefined) return fallback
@@ -56,9 +113,6 @@ const STOP_TIMEOUT_MS = integerSetting('API_STOP_TIMEOUT_MS', envStr('API_STOP_T
 const ALLOW_ENV_OVERRIDES = envBool('API_ALLOW_ENV_OVERRIDES', false)
 const REVEAL_ENABLED = envBool('API_ALLOW_CONFIG_REVEAL', false)
 const ALLOW_CONFIG_WRITE = envBool('API_ALLOW_CONFIG_WRITE', false)
-// Writing to the crontab is a meaningfully different trust level than
-// starting/stopping a run, so it gets its own opt-in flag rather than
-// riding along with API_MODE=true for free.
 const ALLOW_SCHEDULE_WRITE = envBool('API_ALLOW_SCHEDULE_WRITE', false)
 
 const RUN_HISTORY = integerSetting('API_RUN_HISTORY', envStr('API_RUN_HISTORY'), 20)
@@ -91,10 +145,6 @@ if (containsControlCharacters(HOST) || containsControlCharacters(CORS_ORIGIN)) {
     process.exit(1)
 }
 
-// Forward bot stdout/stderr to the API server's own output streams so that
-// container logs (docker logs) continue to show the bot's output regardless
-// of which mode started the run. Controller messages (run start/stop lifecycle
-// events from ProcessManager) are included - they are low-volume and useful.
 pm.on('log', entry => {
     const line = (entry.raw ?? entry.message ?? '') + '\n'
     if (entry.source === 'stderr') process.stderr.write(line)
@@ -454,11 +504,6 @@ const requestHandler = async (req, res) => {
             return sendJson(res, 200, { path: loaded.path, redacted: !reveal, config: data })
         }
 
-        // conf diff - lists keys present in config.example.json but missing
-        // from the live config.json. Same check entrypoint.sh runs on
-        // container start, exposed here so a dashboard can surface it
-        // without waiting for the next restart. Always readable; no write
-        // gate needed since it doesn't touch the file.
         if (method === 'GET' && pathname === '/config/diff') {
             try {
                 const { addedKeys } = await diffConfig(projectRoot, {
@@ -470,10 +515,6 @@ const requestHandler = async (req, res) => {
             }
         }
 
-        // conf sync - patches missing keys into config.json using
-        // config.example.json's defaults, without touching values the user
-        // already set. Same trust level as PUT/PATCH /config, so it rides
-        // the same flag.
         if (method === 'POST' && pathname === '/config/sync') {
             if (!ALLOW_CONFIG_WRITE) {
                 return sendJson(res, 403, {
